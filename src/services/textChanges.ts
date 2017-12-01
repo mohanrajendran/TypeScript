@@ -6,25 +6,25 @@ namespace ts.textChanges {
      * It can be changed to side-table later if we decide that current design is too invasive.
      */
     function getPos(n: TextRange): number {
-        const result = (<any>n)["__pos"];
+        const result = (<any>n).__pos;
         Debug.assert(typeof result === "number");
         return result;
     }
 
     function setPos(n: TextRange, pos: number): void {
         Debug.assert(typeof pos === "number");
-        (<any>n)["__pos"] = pos;
+        (<any>n).__pos = pos;
     }
 
     function getEnd(n: TextRange): number {
-        const result = (<any>n)["__end"];
+        const result = (<any>n).__end;
         Debug.assert(typeof result === "number");
         return result;
     }
 
     function setEnd(n: TextRange, end: number): void {
         Debug.assert(typeof end === "number");
-        (<any>n)["__end"] = end;
+        (<any>n).__end = end;
     }
 
     export interface ConfigurableStart {
@@ -152,7 +152,9 @@ namespace ts.textChanges {
             return position === Position.Start ? start : fullStart;
         }
         // get start position of the line following the line that contains fullstart position
-        let adjustedStartPosition = getStartPositionOfLine(getLineOfLocalPosition(sourceFile, fullStartLine) + 1, sourceFile);
+        // (but only if the fullstart isn't the very beginning of the file)
+        const nextLineStart = fullStart > 0 ? 1 : 0;
+        let adjustedStartPosition = getStartPositionOfLine(getLineOfLocalPosition(sourceFile, fullStartLine) + nextLineStart, sourceFile);
         // skip whitespaces/newlines
         adjustedStartPosition = skipWhitespacesAndLineBreaks(sourceFile.text, adjustedStartPosition);
         return getStartPositionOfLine(getLineOfLocalPosition(sourceFile, adjustedStartPosition), sourceFile);
@@ -184,17 +186,28 @@ namespace ts.textChanges {
         return s;
     }
 
+    export interface TextChangesContext {
+        newLineCharacter: string;
+        formatContext: ts.formatting.FormatContext;
+    }
+
     export class ChangeTracker {
         private changes: Change[] = [];
         private readonly newLineCharacter: string;
 
-        public static fromContext(context: RefactorContext | CodeFixContext) {
-            return new ChangeTracker(context.newLineCharacter === "\n" ? NewLineKind.LineFeed : NewLineKind.CarriageReturnLineFeed, context.rulesProvider);
+        public static fromContext(context: TextChangesContext): ChangeTracker {
+            return new ChangeTracker(context.newLineCharacter === "\n" ? NewLineKind.LineFeed : NewLineKind.CarriageReturnLineFeed, context.formatContext);
+        }
+
+        public static with(context: TextChangesContext, cb: (tracker: ChangeTracker) => void): FileTextChanges[] {
+            const tracker = ChangeTracker.fromContext(context);
+            cb(tracker);
+            return tracker.getChanges();
         }
 
         constructor(
             private readonly newLine: NewLineKind,
-            private readonly rulesProvider: formatting.RulesProvider,
+            private readonly formatContext: ts.formatting.FormatContext,
             private readonly validator?: (text: NonFormattedText) => void) {
             this.newLineCharacter = getNewLineCharacter({ newLine });
         }
@@ -224,7 +237,7 @@ namespace ts.textChanges {
                 Debug.fail("node is not a list element");
                 return this;
             }
-            const index = containingList.indexOf(node);
+            const index = indexOfNode(containingList, node);
             if (index < 0) {
                 return this;
             }
@@ -356,7 +369,7 @@ namespace ts.textChanges {
                 Debug.fail("node is not a list element");
                 return this;
             }
-            const index = containingList.indexOf(after);
+            const index = indexOfNode(containingList, after);
             if (index < 0) {
                 return this;
             }
@@ -462,7 +475,7 @@ namespace ts.textChanges {
                         options: {}
                     });
                     // use the same indentation as 'after' item
-                    const indentation = formatting.SmartIndenter.findFirstNonWhitespaceColumn(afterStartLinePosition, afterStart, sourceFile, this.rulesProvider.getFormatOptions());
+                    const indentation = formatting.SmartIndenter.findFirstNonWhitespaceColumn(afterStartLinePosition, afterStart, sourceFile, this.formatContext.options);
                     // insert element before the line break on the line that contains 'after' element
                     let insertPos = skipTrivia(sourceFile.text, end, /*stopAfterLineBreak*/ true, /*stopAtComments*/ false);
                     if (insertPos !== end && isLineBreak(sourceFile.text.charCodeAt(insertPos - 1))) {
@@ -549,7 +562,7 @@ namespace ts.textChanges {
                 this.validator(nonformattedText);
             }
 
-            const formatOptions = this.rulesProvider.getFormatOptions();
+            const { options: formatOptions } = this.formatContext;
             const posStartsLine = getLineStartPositionForPosition(pos, sourceFile) === pos;
 
             const initialIndentation =
@@ -565,7 +578,7 @@ namespace ts.textChanges {
                         ? (formatOptions.indentSize || 0)
                         : 0;
 
-            return applyFormatting(nonformattedText, sourceFile, initialIndentation, delta, this.rulesProvider);
+            return applyFormatting(nonformattedText, sourceFile, initialIndentation, delta, this.formatContext);
         }
 
         private static normalize(changes: Change[]): Change[] {
@@ -592,14 +605,14 @@ namespace ts.textChanges {
         return { text: writer.getText(), node: assignPositionsToNode(node) };
     }
 
-    function applyFormatting(nonFormattedText: NonFormattedText, sourceFile: SourceFile, initialIndentation: number, delta: number, rulesProvider: formatting.RulesProvider) {
+    function applyFormatting(nonFormattedText: NonFormattedText, sourceFile: SourceFile, initialIndentation: number, delta: number, formatContext: ts.formatting.FormatContext) {
         const lineMap = computeLineStarts(nonFormattedText.text);
         const file: SourceFileLike = {
             text: nonFormattedText.text,
             lineMap,
             getLineAndCharacterOfPosition: pos => computeLineAndCharacterOfPosition(lineMap, pos)
         };
-        const changes = formatting.formatNodeGivenIndentation(nonFormattedText.node, file, sourceFile.languageVariant, initialIndentation, delta, rulesProvider);
+        const changes = formatting.formatNodeGivenIndentation(nonFormattedText.node, file, sourceFile.languageVariant, initialIndentation, delta, formatContext);
         return applyChanges(nonFormattedText.text, changes);
     }
 
